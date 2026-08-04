@@ -35,6 +35,7 @@ interface AutoClipState {
   pushLog: (line: string) => void;
   addClip: (clip: ClipResult) => void;
   setClips: (clips: ClipResult[]) => void;
+  patchClip: (id: string, patch: Partial<ClipResult>) => void;
   setHighlights: (highlights: Highlight[]) => void;
   setError: (error: string | null) => void;
   requestCancel: () => void;
@@ -61,20 +62,37 @@ export const useAutoClipStore = create<AutoClipState>((set) => ({
   setSource: (source, file) => set({ source, file, step: source ? 2 : 1 }),
   patchConfig: (patch) => set((state) => ({ config: { ...state.config, ...patch } })),
   patchSubtitle: (patch) =>
-    set((state) => ({ config: { ...state.config, subtitle: { ...state.config.subtitle, ...patch } } })),
+    set((state) => ({
+      config: { ...state.config, subtitle: { ...state.config.subtitle, ...patch } },
+    })),
   patchWatermark: (patch) =>
-    set((state) => ({ config: { ...state.config, watermark: { ...state.config.watermark, ...patch } } })),
+    set((state) => ({
+      config: { ...state.config, watermark: { ...state.config.watermark, ...patch } },
+    })),
   setCues: (cues, transcriptName) => set({ cues, transcriptName }),
   setStage: (stage, detail = "") => set({ stage, detail }),
   setProgress: (progress) => set({ progress }),
   pushLog: (line) => set((state) => ({ logs: [...state.logs.slice(-120), line] })),
   addClip: (clip) => set((state) => ({ clips: [...state.clips, clip] })),
   setClips: (clips) => set({ clips }),
+  patchClip: (id, patch) =>
+    set((state) => ({
+      clips: state.clips.map((clip) => (clip.id === id ? { ...clip, ...patch } : clip)),
+    })),
   setHighlights: (highlights) => set({ highlights }),
   setError: (error) => set({ error }),
   requestCancel: () => set({ cancelRequested: true }),
   resetRun: () =>
-    set({ stage: "idle", detail: "", progress: 0, clips: [], highlights: [], error: null, cancelRequested: false, logs: [] }),
+    set({
+      stage: "idle",
+      detail: "",
+      progress: 0,
+      clips: [],
+      highlights: [],
+      error: null,
+      cancelRequested: false,
+      logs: [],
+    }),
   resetAll: () =>
     set({
       step: 1,

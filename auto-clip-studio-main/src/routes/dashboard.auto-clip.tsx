@@ -10,21 +10,27 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import {
   AlertTriangle,
+  Copy,
   Download,
   FileVideo,
+  Hash,
   Loader2,
   RotateCcw,
   Sparkles,
   Upload,
+  Wand2,
   X,
   Youtube,
 } from "lucide-react";
 import { OptionRow, ScoreBar, StepCard } from "@/features/autoclip/components/ui-bits";
 import { useAutoClipStore } from "@/features/autoclip/store";
 import { fetchYouTubePreview, parseYouTubeId, readVideoMeta } from "@/features/autoclip/source";
-import { parseSubtitles } from "@/features/autoclip/subtitles";
+import { parseSubtitles, sliceCues } from "@/features/autoclip/subtitles";
 import { isCancellation, runPipeline } from "@/features/autoclip/pipeline";
 import { downloadBlob, saveRun } from "@/features/autoclip/useLibrary";
+import { resolveActive, useByok } from "@/features/ai/byok";
+import { aiGenerateClipMeta } from "@/features/ai/captions";
+import { AiRequestError } from "@/features/ai/client";
 import {
   STAGE_LABEL,
   formatBytes,
@@ -41,10 +47,14 @@ export const Route = createFileRoute("/dashboard/auto-clip")({
       { title: "Auto Clip — AutoClip AI" },
       {
         name: "description",
-        content: "Load a video, pick quality, length, count, aspect ratio, captions and watermark, then generate clips locally.",
+        content:
+          "Load a video, pick quality, length, count, aspect ratio, captions and watermark, then generate clips locally.",
       },
       { property: "og:title", content: "Auto Clip — AutoClip AI" },
-      { property: "og:description", content: "Generate short clips from long videos entirely in your browser." },
+      {
+        property: "og:description",
+        content: "Generate short clips from long videos entirely in your browser.",
+      },
     ],
   }),
   component: AutoClipPage,
@@ -55,57 +65,54 @@ const LENGTHS = [15, 30, 45, 60];
 const COUNTS = [1, 3, 5, 10];
 const ASPECTS: AspectRatio[] = ["9:16", "1:1", "16:9"];
 const FORMATS: ExportFormat[] = ["mp4", "webm", "gif"];
-const POSITIONS: WatermarkPosition[] = ["top-left", "top-right", "bottom-left", "bottom-right", "center"];
+const POSITIONS: WatermarkPosition[] = [
+  "top-left",
+  "top-right",
+  "bottom-left",
+  "bottom-right",
+  "center",
+];
 
 function AutoClipPage() {
   const store = useAutoClipStore();
-  const {
-    source,
-    file,
-    config,
-    stage,
-    detail,
-    progress,
-    clips,
-    error,
-    cues,
-    transcriptName,
-  } = store;
+  const { source, file, config, stage, detail, progress, clips, error, cues, transcriptName } =
+    store;
   const [url, setUrl] = useState("");
   const [urlBusy, setUrlBusy] = useState(false);
   const [customLength, setCustomLength] = useState(String(config.clipLength));
   const [dragging, setDragging] = useState(false);
+  const [captioning, setCaptioning] = useState<Record<string, boolean>>({});
   const cancelRef = useRef(false);
   const running = stage !== "idle" && stage !== "done" && stage !== "error";
 
+  const byok = useByok();
+  const aiReady = Boolean(resolveActive(byok)?.ready);
+
   useEffect(() => () => useAutoClipStore.getState().resetRun(), []);
 
-  const handleFile = useCallback(
-    async (incoming: File) => {
-      if (!incoming.type.startsWith("video/")) {
-        toast.error("That file isn't a video.");
-        return;
-      }
-      try {
-        const meta = await readVideoMeta(incoming);
-        useAutoClipStore.getState().setSource(
-          {
-            kind: "file",
-            title: incoming.name.replace(/\.[^.]+$/, ""),
-            thumbnail: null,
-            duration: meta.duration,
-            fileName: incoming.name,
-            fileSize: incoming.size,
-          },
-          incoming,
-        );
-        toast.success(`Loaded ${incoming.name} (${formatDuration(meta.duration)})`);
-      } catch (cause) {
-        toast.error(cause instanceof Error ? cause.message : "Could not read that video.");
-      }
-    },
-    [],
-  );
+  const handleFile = useCallback(async (incoming: File) => {
+    if (!incoming.type.startsWith("video/")) {
+      toast.error("That file isn't a video.");
+      return;
+    }
+    try {
+      const meta = await readVideoMeta(incoming);
+      useAutoClipStore.getState().setSource(
+        {
+          kind: "file",
+          title: incoming.name.replace(/\.[^.]+$/, ""),
+          thumbnail: null,
+          duration: meta.duration,
+          fileName: incoming.name,
+          fileSize: incoming.size,
+        },
+        incoming,
+      );
+      toast.success(`Loaded ${incoming.name} (${formatDuration(meta.duration)})`);
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : "Could not read that video.");
+    }
+  }, []);
 
   const validateUrl = async () => {
     const id = parseYouTubeId(url);
@@ -143,7 +150,13 @@ function AutoClipPage() {
 
     try {
       const output = await runPipeline(
-        { file, fileName: source.fileName ?? source.title, duration: source.duration, config, cues },
+        {
+          file,
+          fileName: source.fileName ?? source.title,
+          duration: source.duration,
+          config,
+          cues,
+        },
         {
           onStage: (nextStage, nextDetail) => state.setStage(nextStage, nextDetail),
           onProgress: (ratio) => state.setProgress(ratio),
@@ -174,6 +187,48 @@ function AutoClipPage() {
     }
   };
 
+  const generateCaption = async (clip: (typeof clips)[number]) => {
+    if (!aiReady) {
+      toast.error("Configure an AI provider in Settings first.");
+      return;
+    }
+    setCaptioning((current) => ({ ...current, [clip.id]: true }));
+    try {
+      const excerpt = sliceCues(cues, clip.start, clip.end)
+        .map((cue) => cue.text)
+        .join(" ")
+        .trim();
+      const context: { sourceTitle?: string } = {};
+      if (source?.title) context.sourceTitle = source.title;
+      const meta = await aiGenerateClipMeta(excerpt, {
+        ...context,
+        start: clip.start,
+        end: clip.end,
+      });
+      store.patchClip(clip.id, { ai: { ...meta, createdAt: Date.now() } });
+      toast.success("AI caption generated");
+    } catch (cause) {
+      const message =
+        cause instanceof AiRequestError || cause instanceof Error
+          ? cause.message
+          : "AI caption failed";
+      toast.error(message);
+    } finally {
+      setCaptioning((current) => {
+        const next = { ...current };
+        delete next[clip.id];
+        return next;
+      });
+    }
+  };
+
+  const copyText = (text: string) => {
+    void navigator.clipboard?.writeText(text).then(
+      () => toast.success("Copied"),
+      () => toast.error("Couldn't copy"),
+    );
+  };
+
   return (
     <div className="mx-auto w-full max-w-6xl">
       <header className="flex flex-wrap items-end justify-between gap-4">
@@ -183,14 +238,23 @@ function AutoClipPage() {
             Eight steps. Zero uploads. ffmpeg.wasm does the work in this tab.
           </p>
         </div>
-        <Button variant="ghost" className="rounded-full" onClick={() => useAutoClipStore.getState().resetAll()}>
+        <Button
+          variant="ghost"
+          className="rounded-full"
+          onClick={() => useAutoClipStore.getState().resetAll()}
+        >
           <RotateCcw className="size-4" /> Reset
         </Button>
       </header>
 
       <div className="mt-8 grid min-w-0 gap-4 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
         <div className="flex min-w-0 flex-col gap-4">
-          <StepCard step={1} title="Source" description="Paste a YouTube link for metadata, then drop the video file." complete={Boolean(source)}>
+          <StepCard
+            step={1}
+            title="Source"
+            description="Paste a YouTube link for metadata, then drop the video file."
+            complete={Boolean(source)}
+          >
             <div className="flex min-w-0 flex-col gap-3 sm:flex-row">
               <div className="relative min-w-0 flex-1">
                 <Youtube className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
@@ -234,7 +298,9 @@ function AutoClipPage() {
               />
               <Upload className="size-5 text-muted-foreground" />
               <p className="mt-3 text-sm font-medium">Drop a video or browse</p>
-              <p className="mt-1 text-xs text-muted-foreground">MP4, MOV, WebM, MKV — stays on this device</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                MP4, MOV, WebM, MKV — stays on this device
+              </p>
             </label>
 
             {source ? (
@@ -276,8 +342,8 @@ function AutoClipPage() {
             {source?.kind === "youtube" && !file ? (
               <p className="mt-3 flex items-start gap-2 rounded-2xl bg-muted p-3 text-xs text-muted-foreground">
                 <AlertTriangle className="mt-0.5 size-4 shrink-0" />
-                Browsers can't download YouTube streams and doing so would break YouTube's terms. Drop the video file
-                you own to run the full local pipeline.
+                Browsers can't download YouTube streams and doing so would break YouTube's terms.
+                Drop the video file you own to run the full local pipeline.
               </p>
             ) : null}
           </StepCard>
@@ -291,7 +357,12 @@ function AutoClipPage() {
             />
           </StepCard>
 
-          <StepCard step={3} title="Clip length" description="Duration of each generated clip." complete>
+          <StepCard
+            step={3}
+            title="Clip length"
+            description="Duration of each generated clip."
+            complete
+          >
             <OptionRow
               ariaLabel="Clip length"
               value={config.clipLength}
@@ -321,16 +392,51 @@ function AutoClipPage() {
             </div>
           </StepCard>
 
-          <StepCard step={4} title="Clip count" description="Diversity rules keep moments from repeating." complete>
+          <StepCard
+            step={4}
+            title="Clip count"
+            description="Diversity rules keep moments from repeating."
+            complete
+          >
             <OptionRow
               ariaLabel="Clip count"
               value={config.clipCount}
               onChange={(value) => store.patchConfig({ clipCount: value })}
               options={COUNTS.map((count) => ({ value: count, label: String(count) }))}
             />
+            <div className="mt-4 rounded-2xl bg-secondary/40 p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <Label htmlFor="ai-rerank" className="text-sm">
+                    AI re-rank highlights
+                  </Label>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Your AI model re-orders candidates by virality using the transcript.
+                  </p>
+                </div>
+                <Switch
+                  id="ai-rerank"
+                  checked={config.ai.rerank}
+                  disabled={!aiReady}
+                  onCheckedChange={(checked) =>
+                    store.patchConfig({ ai: { ...config.ai, rerank: checked } })
+                  }
+                />
+              </div>
+              {!aiReady ? (
+                <p className="mt-2 text-[11px] text-muted-foreground">
+                  Set an AI provider in Settings to enable. Needs a transcript (.srt/.vtt).
+                </p>
+              ) : null}
+            </div>
           </StepCard>
 
-          <StepCard step={5} title="Aspect ratio" description="Center-safe crop, then scale." complete>
+          <StepCard
+            step={5}
+            title="Aspect ratio"
+            description="Center-safe crop, then scale."
+            complete
+          >
             <OptionRow
               ariaLabel="Aspect ratio"
               value={config.aspect}
@@ -339,7 +445,12 @@ function AutoClipPage() {
             />
           </StepCard>
 
-          <StepCard step={6} title="Subtitles" description="Import SRT or VTT captions and style the burn-in." complete>
+          <StepCard
+            step={6}
+            title="Subtitles"
+            description="Import SRT or VTT captions and style the burn-in."
+            complete
+          >
             <div className="flex items-center justify-between gap-4">
               <Label htmlFor="subs" className="text-sm">
                 Burn subtitles
@@ -434,7 +545,12 @@ function AutoClipPage() {
             ) : null}
           </StepCard>
 
-          <StepCard step={7} title="Watermark" description="Optional logo burned into every clip." complete>
+          <StepCard
+            step={7}
+            title="Watermark"
+            description="Optional logo burned into every clip."
+            complete
+          >
             <div className="flex flex-col gap-4">
               <label className="focus-ring flex cursor-pointer items-center justify-between rounded-2xl bg-secondary/50 px-4 py-3 text-sm">
                 <span>{config.watermark.dataUrl ? "Logo attached" : "Upload PNG logo"}</span>
@@ -486,7 +602,12 @@ function AutoClipPage() {
             </div>
           </StepCard>
 
-          <StepCard step={8} title="Export & generate" description="Format and frame rate for the render." complete>
+          <StepCard
+            step={8}
+            title="Export & generate"
+            description="Format and frame rate for the render."
+            complete
+          >
             <div className="flex flex-col gap-4">
               <OptionRow
                 ariaLabel="Format"
@@ -504,8 +625,17 @@ function AutoClipPage() {
                 ]}
               />
               <div className="flex flex-wrap gap-3">
-                <Button onClick={generate} disabled={running || !file} className="rounded-full" size="lg">
-                  {running ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
+                <Button
+                  onClick={generate}
+                  disabled={running || !file}
+                  className="rounded-full"
+                  size="lg"
+                >
+                  {running ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <Sparkles className="size-4" />
+                  )}
                   {running ? "Generating…" : "Generate clips"}
                 </Button>
                 {running ? (
@@ -538,14 +668,23 @@ function AutoClipPage() {
             {detail ? <p className="text-xs text-muted-foreground">{detail}</p> : null}
             {error ? <p className="mt-2 text-xs text-destructive">{error}</p> : null}
             <ul className="mt-4 flex flex-col gap-1 text-xs text-muted-foreground">
-              {(["extract-audio", "analyze-audio", "analyze-motion", "scoring", "cutting", "exporting"] as const).map(
-                (key) => (
-                  <li key={key} className="flex items-center gap-2">
-                    <span className={`size-1.5 rounded-full ${stage === key ? "bg-foreground" : "bg-border"}`} />
-                    {STAGE_LABEL[key]}
-                  </li>
-                ),
-              )}
+              {(
+                [
+                  "extract-audio",
+                  "analyze-audio",
+                  "analyze-motion",
+                  "scoring",
+                  "cutting",
+                  "exporting",
+                ] as const
+              ).map((key) => (
+                <li key={key} className="flex items-center gap-2">
+                  <span
+                    className={`size-1.5 rounded-full ${stage === key ? "bg-foreground" : "bg-border"}`}
+                  />
+                  {STAGE_LABEL[key]}
+                </li>
+              ))}
             </ul>
           </div>
 
@@ -568,24 +707,113 @@ function AutoClipPage() {
                 {clips.map((clip) => (
                   <li key={clip.id} className="rounded-2xl bg-secondary/40 p-3">
                     {clip.format === "gif" ? (
-                      <img src={clip.url} alt={clip.name} className="w-full rounded-xl" loading="lazy" />
+                      <img
+                        src={clip.url}
+                        alt={clip.name}
+                        className="w-full rounded-xl"
+                        loading="lazy"
+                      />
                     ) : (
-                      <video src={clip.url} controls className="w-full rounded-xl" preload="metadata" />
+                      <video
+                        src={clip.url}
+                        controls
+                        className="w-full rounded-xl"
+                        preload="metadata"
+                      />
                     )}
                     <div className="mt-3 flex items-center justify-between gap-2">
                       <p className="truncate font-mono text-xs text-muted-foreground">
-                        {formatDuration(clip.start)} → {formatDuration(clip.end)} · {formatBytes(clip.size)}
+                        {formatDuration(clip.start)} → {formatDuration(clip.end)} ·{" "}
+                        {formatBytes(clip.size)}
                       </p>
-                      <Button
-                        size="icon"
-                        variant="ghost"
-                        className="rounded-full"
-                        aria-label={`Download ${clip.name}`}
-                        onClick={() => downloadBlob(clip.blob, clip.name)}
-                      >
-                        <Download className="size-4" />
-                      </Button>
+                      <div className="flex items-center gap-1">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="rounded-full"
+                          disabled={captioning[clip.id] || !aiReady}
+                          aria-label="Generate AI caption"
+                          onClick={() => generateCaption(clip)}
+                        >
+                          {captioning[clip.id] ? (
+                            <Loader2 className="size-4 animate-spin" />
+                          ) : (
+                            <Wand2 className="size-4" />
+                          )}
+                          AI
+                        </Button>
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          className="rounded-full"
+                          aria-label={`Download ${clip.name}`}
+                          onClick={() => downloadBlob(clip.blob, clip.name)}
+                        >
+                          <Download className="size-4" />
+                        </Button>
+                      </div>
                     </div>
+
+                    {clip.ai ? (
+                      <div className="mt-3 rounded-2xl bg-background/60 p-3">
+                        {clip.ai.title ? (
+                          <button
+                            type="button"
+                            onClick={() => copyText(clip.ai?.title ?? "")}
+                            className="block w-full text-left text-sm font-semibold hover:underline"
+                          >
+                            {clip.ai.title}
+                          </button>
+                        ) : null}
+                        {clip.ai.caption ? (
+                          <button
+                            type="button"
+                            onClick={() => copyText(clip.ai?.caption ?? "")}
+                            className="mt-1 block w-full text-left text-xs text-muted-foreground hover:underline"
+                          >
+                            {clip.ai.caption}
+                          </button>
+                        ) : null}
+                        {clip.ai.hashtags.length > 0 ? (
+                          <div className="mt-2 flex flex-wrap gap-1">
+                            {clip.ai.hashtags.map((tag) => (
+                              <button
+                                key={tag}
+                                type="button"
+                                onClick={() => copyText(`#${tag}`)}
+                                className="inline-flex items-center gap-1 rounded-full bg-secondary px-2 py-0.5 text-[11px] hover:bg-secondary/70"
+                              >
+                                <Hash className="size-2.5" />
+                                {tag}
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+                        <div className="mt-2 flex items-center justify-between">
+                          <span className="font-mono text-[10px] text-muted-foreground">
+                            {clip.ai.model}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              copyText(
+                                [
+                                  clip.ai?.title,
+                                  clip.ai?.caption,
+                                  (clip.ai?.hashtags ?? []).map((tag) => `#${tag}`).join(" "),
+                                ]
+                                  .filter(Boolean)
+                                  .join("\n\n"),
+                              )
+                            }
+                            className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+                          >
+                            <Copy className="size-3" /> Copy all
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+
                     <div className="mt-3 flex flex-col gap-1.5">
                       <ScoreBar label="Score" value={clip.score} />
                       <ScoreBar label="Audio" value={clip.parts.audio} />

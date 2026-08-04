@@ -8,14 +8,21 @@ import { Slider } from "@/components/ui/slider";
 import { applyTheme, readTheme, type ThemeMode } from "@/lib/theme";
 import { useAutoClipStore } from "@/features/autoclip/store";
 import { db } from "@/lib/db";
+import { ByokSection } from "@/components/ai/byok-section";
 
 export const Route = createFileRoute("/dashboard/settings")({
   head: () => ({
     meta: [
       { title: "Settings — AutoClip AI" },
-      { name: "description", content: "Theme, performance mode, memory limits, cache and keyboard shortcuts." },
+      {
+        name: "description",
+        content: "Theme, performance mode, memory limits, cache and keyboard shortcuts.",
+      },
       { property: "og:title", content: "Settings — AutoClip AI" },
-      { property: "og:description", content: "Tune performance, storage and appearance for local clip rendering." },
+      {
+        property: "og:description",
+        content: "Tune performance, storage and appearance for local clip rendering.",
+      },
     ],
   }),
   component: SettingsPage,
@@ -44,7 +51,9 @@ function SettingsPage() {
     <div className="mx-auto w-full max-w-3xl">
       <header>
         <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">Settings</h1>
-        <p className="mt-1 text-sm text-muted-foreground">Preferences stay in local storage on this device.</p>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Preferences stay in local storage on this device.
+        </p>
       </header>
 
       <section className="mt-8 flex flex-col gap-4">
@@ -64,19 +73,25 @@ function SettingsPage() {
           </div>
         </div>
 
+        <ByokSection />
+
         <div className="rounded-3xl glass p-5">
           <h2 className="text-sm font-semibold tracking-tight">Performance</h2>
           <div className="mt-4 flex items-center justify-between gap-4">
             <div>
               <Label htmlFor="perf">Fast encode preset</Label>
-              <p className="mt-1 text-xs text-muted-foreground">Trades a little quality for much faster exports.</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Trades a little quality for much faster exports.
+              </p>
             </div>
             <Switch id="perf" checked={performanceMode} onCheckedChange={setPerformanceMode} />
           </div>
           <div className="mt-5 flex items-center justify-between gap-4">
             <div>
               <Label htmlFor="autosave">Auto save projects</Label>
-              <p className="mt-1 text-xs text-muted-foreground">Store finished runs in IndexedDB automatically.</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Store finished runs in IndexedDB automatically.
+              </p>
             </div>
             <Switch id="autosave" checked={autoSave} onCheckedChange={setAutoSave} />
           </div>
@@ -101,7 +116,9 @@ function SettingsPage() {
               variant="outline"
               className="rounded-full"
               onClick={() => {
-                const blob = new Blob([JSON.stringify(config, null, 2)], { type: "application/json" });
+                const blob = new Blob([JSON.stringify(config, null, 2)], {
+                  type: "application/json",
+                });
                 const link = document.createElement("a");
                 link.href = URL.createObjectURL(blob);
                 link.download = "autoclip-settings.json";

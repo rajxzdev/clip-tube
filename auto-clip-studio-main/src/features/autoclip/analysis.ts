@@ -31,7 +31,8 @@ export interface AudioAnalysis {
 /** Decodes a WAV buffer and builds a normalised loudness envelope. */
 export async function analyzeAudio(wav: Uint8Array, bucketSeconds = 0.5): Promise<AudioAnalysis> {
   const AudioContextClass =
-    window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    window.AudioContext ??
+    (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
   if (!AudioContextClass) throw new Error("Web Audio API unavailable");
   const context = new AudioContextClass();
   const copy = new Uint8Array(wav.length);
@@ -152,6 +153,8 @@ export interface ScoreInput {
   duration: number;
   clipLength: number;
   clipCount: number;
+  /** How many diverse candidates to return (defaults to clipCount). */
+  candidateCount?: number;
 }
 
 /** Windowed highlight scoring with diversity-aware selection. */
@@ -162,11 +165,13 @@ export function detectHighlights({
   duration,
   clipLength,
   clipCount,
+  candidateCount,
 }: ScoreInput): Highlight[] {
   // Never ask for a clip longer than the source video.
   const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : clipLength;
   const length = Math.max(1, Math.min(clipLength, safeDuration));
   const step = Math.max(1, Math.round(length / 4));
+  const target = Math.max(1, candidateCount ?? clipCount);
   const candidates: Highlight[] = [];
 
   for (let start = 0; start + length <= Math.max(length, safeDuration); start += step) {
@@ -195,7 +200,11 @@ export function detectHighlights({
     };
 
     const score = clamp(
-      parts.audio * 0.32 + parts.speech * 0.24 + parts.silence * 0.14 + parts.motion * 0.2 + parts.keywords * 0.1,
+      parts.audio * 0.32 +
+        parts.speech * 0.24 +
+        parts.silence * 0.14 +
+        parts.motion * 0.2 +
+        parts.keywords * 0.1,
     );
 
     candidates.push({ id: `${start.toFixed(2)}-${end.toFixed(2)}`, start, end, score, parts });
@@ -206,7 +215,7 @@ export function detectHighlights({
   const picked: Highlight[] = [];
   const minGap = length * 0.9;
   for (const candidate of candidates) {
-    if (picked.length >= clipCount) break;
+    if (picked.length >= target) break;
     const overlaps = picked.some((item) => Math.abs(item.start - candidate.start) < minGap);
     if (!overlaps) picked.push(candidate);
   }
