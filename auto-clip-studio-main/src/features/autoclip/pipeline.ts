@@ -1,6 +1,8 @@
 import { getEngine } from "./engine";
 import { analyzeAudio, analyzeMotion, detectHighlights, type AudioAnalysis } from "./analysis";
 import { buildAss, sliceCues } from "./subtitles";
+import { aiRerankHighlights } from "../ai/rerank";
+import { resolveProvider } from "../ai/client";
 import {
   ASPECT_RATIO_VALUE,
   QUALITY_HEIGHT,
@@ -94,7 +96,10 @@ class Cancelled extends Error {
 }
 
 /** Full browser-side pipeline: analyze -> score -> cut -> style -> export. */
-export async function runPipeline(input: PipelineInput, callbacks: PipelineCallbacks): Promise<PipelineOutput> {
+export async function runPipeline(
+  input: PipelineInput,
+  callbacks: PipelineCallbacks,
+): Promise<PipelineOutput> {
   const { file, config, duration } = input;
   const guard = () => {
     if (callbacks.shouldCancel?.()) throw new Cancelled();
@@ -128,6 +133,8 @@ export async function runPipeline(input: PipelineInput, callbacks: PipelineCallb
 
   callbacks.onStage("scoring");
   callbacks.onProgress(0.42);
+  const aiConfigured = resolveProvider() !== null;
+  const useAiRerank = Boolean(config.ai?.rerank) && aiConfigured && input.cues.length > 0;
   const highlights = detectHighlights({
     audio,
     motion,
@@ -135,7 +142,22 @@ export async function runPipeline(input: PipelineInput, callbacks: PipelineCallb
     duration: duration || audio.duration,
     clipLength: config.clipLength,
     clipCount: config.clipCount,
+    candidateCount: useAiRerank ? Math.min(16, config.clipCount * 3 + 3) : config.clipCount,
   });
+
+  let rankedHighlights = highlights;
+  if (useAiRerank) {
+    callbacks.onStage("scoring", "AI re-ranking from transcript");
+    const rerank = await aiRerankHighlights(highlights, input.cues, config.clipCount);
+    rankedHighlights = rerank.highlights;
+    if (rerank.reranked) {
+      callbacks.onLog?.(
+        `AI rerank applied (${highlights.length} → ${rankedHighlights.length} clips)`,
+      );
+    } else if (rerank.note) {
+      callbacks.onLog?.(`AI rerank skipped: ${rerank.note}`);
+    }
+  }
 
   const ratio = ASPECT_RATIO_VALUE[config.aspect];
   const height = QUALITY_HEIGHT[config.quality];
@@ -148,20 +170,23 @@ export async function runPipeline(input: PipelineInput, callbacks: PipelineCallb
   const clips: ClipResult[] = [];
   let subtitleFailed = false;
 
-  for (let index = 0; index < highlights.length; index += 1) {
+  for (let index = 0; index < rankedHighlights.length; index += 1) {
     guard();
-    const highlight = highlights[index];
+    const highlight = rankedHighlights[index];
     if (!highlight) continue;
 
-    callbacks.onStage("cutting", `Clip ${index + 1} of ${highlights.length}`);
-    const base = 0.45 + (index / highlights.length) * 0.5;
+    callbacks.onStage("cutting", `Clip ${index + 1} of ${rankedHighlights.length}`);
+    const base = 0.45 + (index / rankedHighlights.length) * 0.5;
     callbacks.onProgress(base);
 
     const clipCues = sliceCues(input.cues, highlight.start, highlight.end);
     const wantsSubtitles = config.subtitle.enabled && clipCues.length > 0 && !subtitleFailed;
     if (wantsSubtitles) {
       callbacks.onStage("subtitles", `Clip ${index + 1}`);
-      await engine.writeFile("sub.ass", new TextEncoder().encode(buildAss(clipCues, config.subtitle, width, height)));
+      await engine.writeFile(
+        "sub.ass",
+        new TextEncoder().encode(buildAss(clipCues, config.subtitle, width, height)),
+      );
     }
 
     const output = `clip-${index + 1}.${EXT_ARGS[config.format].ext}`;
@@ -225,7 +250,7 @@ export async function runPipeline(input: PipelineInput, callbacks: PipelineCallb
   await engine.deleteFile(inputName).catch(() => undefined);
   await engine.deleteFile("audio.wav").catch(() => undefined);
 
-  return { clips, highlights, analysis: audio };
+  return { clips, highlights: rankedHighlights, analysis: audio };
 }
 
 interface ArgsInput {

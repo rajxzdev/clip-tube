@@ -1,7 +1,8 @@
 export type Quality = "360p" | "480p" | "720p" | "1080p";
 export type AspectRatio = "9:16" | "1:1" | "16:9";
 export type ExportFormat = "mp4" | "webm" | "gif";
-export type WatermarkPosition = "top-left" | "top-right" | "bottom-left" | "bottom-right" | "center";
+export type WatermarkPosition =
+  "top-left" | "top-right" | "bottom-left" | "bottom-right" | "center";
 export type SubtitlePosition = "top" | "center" | "bottom";
 
 export interface WatermarkConfig {
@@ -22,6 +23,21 @@ export interface SubtitleStyle {
   highlightWords: boolean;
 }
 
+/** BYOK AI options that affect the clip pipeline. */
+export interface AiConfig {
+  /** Use the configured AI model to re-rank highlight candidates from the transcript. */
+  rerank: boolean;
+}
+
+/** AI-generated packaging for a finished clip (title, caption, hashtags). */
+export interface ClipAiMeta {
+  title: string;
+  caption: string;
+  hashtags: string[];
+  model: string;
+  createdAt: number;
+}
+
 export interface ClipConfig {
   quality: Quality;
   clipLength: number;
@@ -31,6 +47,7 @@ export interface ClipConfig {
   watermark: WatermarkConfig;
   format: ExportFormat;
   fps: 30 | 60;
+  ai: AiConfig;
 }
 
 export interface SourceMeta {
@@ -107,6 +124,8 @@ export interface ClipResult {
   blob: Blob;
   url: string;
   createdAt: number;
+  /** AI-generated title/caption/hashtags, populated on demand. */
+  ai?: ClipAiMeta;
 }
 
 export const QUALITY_HEIGHT: Record<Quality, number> = {
@@ -145,6 +164,7 @@ export const DEFAULT_CONFIG: ClipConfig = {
   },
   format: "mp4",
   fps: 30,
+  ai: { rerank: false },
 };
 
 export function formatDuration(seconds: number): string {

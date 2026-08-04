@@ -12,4 +12,10 @@ export default defineConfig({
     // nitro/vite builds from this
     server: { entry: "server" },
   },
+  vite: {
+    server: {
+      // Allow the Arena live-preview host to reach the dev server.
+      allowedHosts: true,
+    },
+  },
 });
